@@ -1,7 +1,7 @@
 # Be sure to start the redis server using redis-server in terminal
 require 'redis'
 require 'benchmark'
-require './redis_lua_script_builder.rb'
+# require './redis_lua_script_builder'
 
 class RedisWriter
   attr_accessor :r
@@ -12,40 +12,68 @@ class RedisWriter
     @time_elapsed = Benchmark.measure {}
   end
 
-  # Apartments.com has 750_000 houses. This example uses 850_000
-  RANDOM_INTEGER_COUNT = 1_000_000
-  MAX_RANDOM_INTEGER   = 1_500_000
+  # Apartments.com has 750_000 houses. This example uses 1_500_000
+  RANDOM_INTEGER_COUNT = 750_000
+  MAX_RANDOM_INTEGER   = 1_000_000
 
-  def self.random_integers(n = RANDOM_INTEGER_COUNT, max = MAX_RANDOM_INTEGER)
-    n.times.map { rand(max) }
+  def self.random_integers(numbers = RANDOM_INTEGER_COUNT, range = (0..MAX_RANDOM_INTEGER))
+    numbers.times.map { rand(range) }
   end
 
-  def reset_db()
-    puts "Flushing Database"
+
+  def force_db_reset
+    reset_db(true, false)
+  end
+
+  def reset_db(force = false, print_out = true)
+    unless force
+      puts "Do you want to flush the database? (Y/N)"
+      while true
+        case gets.chomp.downcase.to_sym
+        when :y
+          break
+        when :n
+          return
+        end
+      end
+    end
+    puts "Flushing Database" if print_out
     total_time = Benchmark.measure {
       @r.flushall
     }
     @time_elapsed += total_time
-    puts "Database flushed (in #{total_time})\n"
+    puts "Database flushed (in #{total_time})\n" if print_out
   end
 
-  def add_amenity_data()
-    amenities = %w(park hoa dogs_allowed cats_allowed ski_resort parking_garage smoking_allowed).map { |amenity_type| ["amenity_#{amenity_type}", "amenity_not_#{amenity_type}"] }.flatten
+  Amenities = %w(park hoa dogs_allowed cats_allowed ski_resort parking_garage smoking_allowed).map { |amenity_type| "amenity_#{amenity_type}" }
 
-    puts "Running test with #{amenities.size} keys"
+  def add_amenity_data(numbers = RANDOM_INTEGER_COUNT, range = (0..MAX_RANDOM_INTEGER))
+    puts "Running test with #{Amenities.size} keys"
 
-    puts "Adding #{RANDOM_INTEGER_COUNT} integer values to the set on each key (unique per key), with each having a range of (0..#{MAX_RANDOM_INTEGER})"
+    puts "Adding #{numbers} integer values to the set on each key (unique per key), with each having a range of #{range}"
 
     total_time = Benchmark.measure() {
-      r.pipelined do |redis|
-        amenities.each { |amenity| redis.sadd(amenity, RedisWriter.random_integers) }
+      @r.pipelined do |redis|
+        Amenities.each { |amenity| redis.sadd(amenity, RedisWriter.random_integers(numbers, range)) }
       end
     }
     @time_elapsed += total_time
     puts "Add amenity data"
     puts "Total:   #{total_time}"
-    puts "Average: #{total_time / amenities.size}"
+    puts "Average: #{total_time / Amenities.size}"
     puts ""
+  end
+
+  def add_boolean_keys(key, values)
+    @r.sadd(key, values)
+  end
+
+  def remove_boolean_key(key, value)
+    @r.srem(key, value)
+  end
+
+  def get_boolean_keys(key)
+    @r.sscan_each(key).to_a.map(&:to_i)
   end
 
   def add_range_data()
@@ -67,6 +95,24 @@ class RedisWriter
     puts ""
   end
 
+  def set_range_keys(key, value_sets)
+    @r.pipelined do |redis|
+      value_sets.each do |value_set|
+        id, value = *value_set
+        redis.hset(key, id, value)
+      end
+    end
+  end
+
+  def get_range_keys(key, range)
+    matching = []
+    @r.hscan_each(key) do |value_set|
+      id, value = value_set.map(&:to_i)
+      matching << [id, value] if range.include?(value)
+    end
+    matching
+  end
+
   def add_geospatial_data()
     total_time = Benchmark.measure() {
       @r.pipelined do |redis|
@@ -85,6 +131,15 @@ class RedisWriter
     puts ""
   end
 
+  def set_range_data(zset_key, location_sets)
+    @r.pipelined do |redis|
+      location_sets.each do |location_set|
+        longitude, latitude, id = *location_set
+        redis.geoadd(zset_key, longitude, latitude, id)
+      end
+    end
+  end
+
   def testing_query()
     query = ""
     total_time = Benchmark.measure() {
@@ -92,7 +147,8 @@ class RedisWriter
       # Has amenities
       rlsb.add_table_existence_requirement_query(:amenity_cats_allowed)
       rlsb.add_table_existence_requirement_query(:amenity_ski_resort)
-      rlsb.add_table_existence_requirement_query(:amenity_not_hoa)
+      # rlsb.add_table_existence_requirement_query(:amenity_not_hoa)
+      rlsb.add_table_not_exist_requirement_query(:amenity_ski_resort)
 
       # Has ranges
       rlsb.add_range_requirement_query(:square_feet, 400..1000)
@@ -122,26 +178,44 @@ class RedisWriter
     @time_elapsed += total_time
     puts "Created query #{total_time}"
     total_time = Benchmark.measure() {
-      r.eval(query)
+      puts r.eval(query)
     }
     @time_elapsed += total_time
     puts "Running query #{total_time}"
   end
 
-  def report_redis_status()
+  def dbsize
+    @r.dbsize
+  end
+
+  def report_redis_status
     puts "DB size = #{@r.dbsize}"
     puts "Total Redis Time #{@time_elapsed}"
   end
 
+  def rebuild_database
+    puts "Are you sure you want to rebuild the database? (Y/N)"
+    while true
+      case gets.chomp.downcase.to_sym
+      when :y
+        reset_db
+        add_amenity_data
+        add_range_data
+        add_geospatial_data
+        break
+      when :n
+        break
+      end
+    end
+  end
+
   def default_setup
-    reset_db
-    add_amenity_data
-    add_range_data
-    add_geospatial_data
+    rebuild_database
     testing_query
     report_redis_status
   end
-end
 
-r = RedisWriter.new
-r.default_setup
+  def get_list(key)
+    @r.lrange(key, 0, -1 ).map(&:to_i)
+  end
+end

@@ -1,13 +1,36 @@
+require 'redis'
 class RedisLuaScriptBuilder
-  attr_accessor :and_query, :and_range_query, :scoring_query, :highest_score, :geo_query, :namespace
+  attr_accessor :sinter_keys,
+                :sdiff_keys,
+                :requirement_query,
+                :scoring_query,
+                :geo_query,
+                :max_score,
+                :namespace,
+                :redis,
+                :debug_mode
 
   def initialize(namespace)
-    @namespace         = namespace
-    @sinter_query      = []
-    @scoring_query     = []
+    @namespace = namespace # Can't change namespace even when reset
+    reset
+  end
+
+  def reset
+    @sinter_keys       = []
+    @sdiff_keys        = []
     @requirement_query = ["RUBY_SUBSTITUTE_LPUSH_SCORE"]
+
+    @scoring_query     = []
+
     @geo_query         = []
     @max_score         = 0
+    @redis             = nil
+    @debug_mode        = false
+  end
+
+  def redis(options = nil)
+    @redis = Redis.new(options) if options
+    @redis ||= Redis.new
   end
 
   GEO_SPATIAL_ZSET_KEY = :home_locations
@@ -18,7 +41,6 @@ class RedisLuaScriptBuilder
   #  Existence (boolean)
   #  Distance (geospatial)
 
-  # Current ranges are monthly_rent && square_feet. Need to add full and half baths.
   # Score the id by one of it's attributes that operate in ranges. If the value is in the range add the weight passed in by the score parameter. If not add 0.
   # Does nothing if score <= 0 or min > max
   def add_range_scoring_query(hash_table, range, score = 1)
@@ -33,7 +55,23 @@ class RedisLuaScriptBuilder
   def add_table_existence_scoring_query(table, score = 1)
     return if score <= 0
     @max_score += score
-    @scoring_query << "r.call('sismember', '#{table}', id)"
+    if score == 1
+      @scoring_query << "r.call('sismember', '#{table}', id)"
+    else
+      @scoring_query << "r.call('sismember', '#{table}', id) * #{score}"
+    end
+  end
+
+
+  def add_table_not_exist_scoring_query(table, score = 1)
+    return if score <= 0
+    @max_score += score
+    # if is member go to 0 else 0 go to 1
+    if score == 1
+      @scoring_query << "((r.call('sismember', '#{table}', id) * -1 + 1))"
+    else
+      @scoring_query << "((r.call('sismember', '#{table}', id) * -1 + 1) * #{score})"
+    end
   end
 
   # Score the id by it's distance from the latitude and longitude. If it's within the distance add the weight passsed in by the score parameter. If not add 0.
@@ -63,7 +101,12 @@ class RedisLuaScriptBuilder
 
   # Select all id's that exist in the intersection of all tables added using this method
   def add_table_existence_requirement_query(table)
-    @sinter_query.push("'#{table}'")
+    @sinter_keys.push("'#{table}'")
+  end
+
+
+  def add_table_not_exist_requirement_query(table)
+    @sdiff_keys.push("'#{table}'")
   end
 
   # Select all id's that are within distance (miles) of the provided latitude and longitude
@@ -76,51 +119,44 @@ class RedisLuaScriptBuilder
 
   ########## String formatting and lua code
   def to_s
-    to_lua_code
+    to_lua_code(false)
   end
 
   def to_lua_code(debug = false)
-    sinter_query      = @sinter_query.join(", ")
-    requirement_query = @requirement_query.join("\n")
-    max_score         = @max_score
     lua_code = <<-LUA
       -- Local variables
       local r          = redis
-      local max_score  = #{max_score}
+      local max_score  = #{@max_score}
 
       -- Redis commands used
-      local del        = 'del'
-      local sinter     = 'sinter'
-      local lpush      = 'lpush'
-      local rpoplpush  = 'rpoplpush'
-      local llen       = 'llen'
-      local hget       = 'hget'
-      local geoadd     = 'geoadd'
-      local geodist    = 'geodist'
-      local zrem       = 'zrem'
+      local del         = 'del'
+      local sinter      = 'sinter'
+      local sinterstore = 'sinterstore'
+      local sdiff       = 'sdiff'
+      local lpush       = 'lpush'
+      local rpoplpush   = 'rpoplpush'
+      local llen        = 'llen'
+      local hget        = 'hget'
+      local geoadd      = 'geoadd'
+      local geodist     = 'geodist'
+      local zrem        = 'zrem'
 
       #{converter_lua_code}
       local base_list_key = #{base_list_key_lua_code}
       #{geo_add_lua_code}
 
-      local ids = r.call(sinter, #{sinter_query})
-      for i = 1, #ids do
-         local id = ids[i]
-         -- This sections could definitely use improvement. Look at TODO below. Also should order the && queries to reduce entropy/work as much as possible.
-         local square_feet  = tonumber(r.call(hget, 'square_feet',  id))
-         local monthly_rent = tonumber(r.call(hget, 'monthly_rent', id))
-         local half_baths   = tonumber(r.call(hget, 'half_baths',   id))
-         local full_baths   = tonumber(r.call(hget, 'full_baths',   id))
-         #{requirement_query}
-      end
+      #{sinter_sdiff_lua_code}
+
+      #{pigeonhole_sort_lua_code}
+
       #{geo_remove_lua_code}
 
       #{pigeonhole_merge_lua_code}
-      return r.call(llen, base_list_key)
+      #{return_lua_code}
     LUA
     lua_code = substitutions(lua_code)
     lua_code = light_minify(lua_code)
-    print_debug_code(lua_code) if (debug)
+    print_debug_code(lua_code) if debug_mode || debug
     minify(lua_code)
   end
 
@@ -132,7 +168,8 @@ class RedisLuaScriptBuilder
   # Removes comments and empty lines
   def light_minify(lua_code)
     lua_code_lines = lua_code.lines.reject do |l|
-      l.strip.start_with?('--') || l.strip.empty?
+      l = l.strip
+      l.start_with?('--') || l.empty?
     end
     lua_code_lines.join
   end
@@ -148,6 +185,15 @@ class RedisLuaScriptBuilder
       "#{l.strip}\n"
     end
     lua_code_lines.join
+  end
+
+  # Used to determine if the search code should be loaded
+  def valid_query?
+    !@sinter_keys.empty?
+  end
+
+  def invalid_query?
+    !valid_query?
   end
 
   # Used to determine if the scoring/sorting code should be loaded.
@@ -167,15 +213,49 @@ class RedisLuaScriptBuilder
 
   # Lua code for converting the different scores to their respective pigeonhole lists. This reduces the amount of lua string manipulation which dramatically impoves the speed. Also deletes old keys (not needed in production because of namespaces). Only needed when scoring.
   def converter_lua_code
-    if scoring?
+    if valid_query? && scoring?
       <<-LUA
         local temp_list_ = '#{namespace}' .. 'temp_list_'
-        local iterator   = max_score
         local converter  = {}
-        while (iterator >= 0) do
-          converter[iterator] = temp_list_ .. iterator
-          r.call(del, converter[iterator])
-          iterator = iterator - 1
+        for i=max_score,0,-1 do
+          converter[i] = temp_list_ .. i
+          r.call(del, converter[i])
+        end
+      LUA
+    else
+      ""
+    end
+  end
+
+  # If Sinter is empty return -1. We need to have some information to go off of to do our query. We could default to a table of all id's but that's not ideal.
+  # Simple sinter if sdiff is not used
+  # If sdiff is used, sinterstore the first set of ids. Use sdiff to remove all sdiff_keys
+  def sinter_sdiff_lua_code
+    sinter_keys = @sinter_keys.join(', ')
+    sdiff_keys  = @sdiff_keys.join(', ')
+    if invalid_query?
+      ""
+    elsif sdiff_keys.empty?
+      "local ids = r.call(sinter, #{sinter_keys})"
+    else
+      ["r.call(sinterstore, '#{namespace}_sinter_key', #{sinter_keys})",
+       "local ids = r.call(sdiff, '#{namespace}_sinter_key', #{sdiff_keys})",
+       "r.call(del, '#{namespace}_sinter_key')"
+      ].join("\n");
+    end
+  end
+
+  def pigeonhole_sort_lua_code
+    if valid_query?
+      <<-LUA
+        for i = 1, #ids do
+           local id = ids[i]
+           -- This sections could definitely use improvement. Look at TODO below. Also should order the && queries to reduce entropy/work as much as possible. In reality, this is just reducing a constant.
+           local square_feet  = tonumber(r.call(hget, 'square_feet',  id))
+           local monthly_rent = tonumber(r.call(hget, 'monthly_rent', id))
+           local half_baths   = tonumber(r.call(hget, 'half_baths',   id))
+           local full_baths   = tonumber(r.call(hget, 'full_baths',   id))
+           #{requirement_query.join("\n")}
         end
       LUA
     else
@@ -185,17 +265,14 @@ class RedisLuaScriptBuilder
 
   # Code for merging the different pigeonhole lists in order so that the final list is sorted in order. Runs in O(max_score + n)
   def pigeonhole_merge_lua_code
-    if scoring?
+    if valid_query? && scoring?
       <<-LUA
-        iterator = max_score - 1
-        while (iterator >= 0) do
-           local list_key = converter[iterator]
-           local list_length = r.call(llen, list_key)
-           while (list_length > 0) do
+        -- Can change command here to flip order from descending to ascending or vice versa etc.
+        for i=max_score-1,0,-1 do
+           local list_key = converter[i]
+           for i=1,r.call(llen, list_key) do
               r.call(rpoplpush, list_key, base_list_key)
-              list_length = list_length - 1
            end
-           iterator = iterator - 1
         end
       LUA
     else
@@ -206,6 +283,10 @@ class RedisLuaScriptBuilder
   # Code for pushing the id into it's pigeonhole list (or single list if not sorting). Has to be substituted at runtime to allow for the requirement_query.
   def lpush_score_lua_code
     scoring? ? "r.call(lpush, converter[#{@scoring_query.join(' + ')}], id)" : "r.call(lpush, '#{@namespace}_list_key', id)"
+  end
+
+  def return_lua_code
+    valid_query? ? "return base_list_key" : "return -1"
   end
 
   # The key of the list that is sorted and meets the requirement queries. If sorting it's the highest scored pigeonhole list. If not sorting it's the default namespaced list key.
@@ -230,6 +311,11 @@ class RedisLuaScriptBuilder
        "r.call(zrem, '#{GEO_SPATIAL_ZSET_KEY}', '#{geo_member_key}')"
      end).join("\n")
   end
+
+  # Send and evaluate it's code on redis.
+  def eval(debug = false)
+    redis.eval(to_lua_code(debug))
+  end
 end
 
 def self.test_query()
@@ -244,7 +330,8 @@ def self.test_query()
   rlsb.add_table_existence_requirement_query(:amenity_cats_allowed)
   rlsb.add_table_existence_requirement_query(:amenity_ski_resort)
 
-  rlsb.add_table_existence_requirement_query(:amenity_not_hoa) # See TODO above
+  # rlsb.add_table_existence_requirement_query(:amenity_not_hoa) # See TODO above
+  rlsb.add_table_not_exist_requirement_query(:amenity_hoa)
 
   # In the future, searches could also look like
   # rlsb.add_table_existence_requirement_query(:city_reston)
