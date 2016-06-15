@@ -1,3 +1,5 @@
+# This was just testing the speed of different configurations and things. If needed I can use it to prove that how I approached this is optimally taking advantage of the Redis data structures - beyond that it's useless.
+
 # Be sure to start the redis server using redis-server in terminal
 require 'redis'
 require 'benchmark'
@@ -52,6 +54,12 @@ end
 reset_db
 default_db
 
+# Mark 5
+# Fastest implementation is what turned into redis_lua_script_builder. The `nice to have` query uses pigeonhole sort to sort the items in O(n) time, where n is the number of items after the && query.
+
+
+# Mark 4
+# Faster. I believe this one actually didn't work either because of zinterstore
 def newest_union()
   and_query = %w(amenity:cats_allowed amenity:hoa)
   or_queries  = %w(amenity:dogs_allowed amenity:parking_garage amenity:ski_resort)
@@ -120,7 +128,8 @@ def newest_union()
 end
 
 
-# Faster. 3 seconds for 500k items
+# Mark 3
+# Faster. 3 seconds for 500k items. Determined this doesn't even work because zunioninterstore will destory the old cache (something like that).
 def self.union_through_distinct_combinations()
   and_query = %w(amenity:cats_allowed amenity:hoa)
   or_queries  = %w(amenity:dogs_allowed amenity:parking_garage amenity:ski_resort)
@@ -172,9 +181,9 @@ def self.union_through_distinct_combinations()
   end
   puts R.zrevrange("zcache:1", 0, -1, with_scores: true).inspect
 end
-# union_through_distinct_combinations()
 
-# Fairly slow. Iteration 1
+# Mark 2
+# Fairly slow
 def self.union_through_zincrby()
   Benchmark.bm(35) do |x|
     x.report("create scache:1") {
@@ -199,7 +208,8 @@ def self.union_through_zincrby()
   end
 end
 
-# Extremely slow. Iteration 1
+# Mark 1
+# Extremely slow
 def self.simple_union_join()
   puts Benchmark.measure {
     R.zinterstore("&cache:1", and_query)
