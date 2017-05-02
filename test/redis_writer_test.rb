@@ -1,5 +1,5 @@
 require 'minitest/autorun'
-require '../lib/redis_writer'
+require './lib/redis_writer'
 
 describe RedisWriter do
   before(:each) do

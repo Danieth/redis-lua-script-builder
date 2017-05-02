@@ -1,7 +1,8 @@
 # Be sure to start the redis server using redis-server in terminal
+
 require 'redis'
+require 'awesome_print'
 require 'benchmark'
-# require './redis_lua_script_builder'
 
 class RedisWriter
   attr_accessor :r
@@ -12,14 +13,13 @@ class RedisWriter
     @time_elapsed = Benchmark.measure {}
   end
 
-  # Apartments.com has 750_000 houses. This example uses 1_500_000
-  RANDOM_INTEGER_COUNT = 750_000
-  MAX_RANDOM_INTEGER   = 1_000_000
+  # Apartments.com has 750_000 houses. This example uses 100_000 - this can be increased up to 1.5 million, but it takes a lot longer to store everything into redis
+  RANDOM_INTEGER_COUNT = 100_000
+  MAX_RANDOM_INTEGER   = 100_000
 
   def self.random_integers(numbers = RANDOM_INTEGER_COUNT, range = (0..MAX_RANDOM_INTEGER))
     numbers.times.map { rand(range) }
   end
-
 
   def force_db_reset
     reset_db(true, false)
@@ -80,7 +80,7 @@ class RedisWriter
     puts "Adding a random values for all ids (0..#{MAX_RANDOM_INTEGER}) for the ('square_feet', 'monthly_rent', 'half_baths', 'full_baths') ranges"
     total_time = Benchmark.measure() {
       @r.pipelined do |redis|
-        (0..MAX_RANDOM_INTEGER).each do |id|
+        for id in 0..MAX_RANDOM_INTEGER
           redis.hset("square_feet",  id, rand(1001) + 100)
           redis.hset("monthly_rent", id, rand(7501) + 500)
           redis.hset("half_baths",   id, rand(6))
@@ -148,39 +148,48 @@ class RedisWriter
       rlsb.add_table_existence_requirement_query(:amenity_cats_allowed)
       rlsb.add_table_existence_requirement_query(:amenity_ski_resort)
       # rlsb.add_table_existence_requirement_query(:amenity_not_hoa)
-      rlsb.add_table_not_exist_requirement_query(:amenity_ski_resort)
+      # rlsb.add_table_not_exist_requirement_query(:amenity_ski_resort)
 
       # Has ranges
       rlsb.add_range_requirement_query(:square_feet, 400..1000)
       rlsb.add_range_requirement_query(:monthly_rent, 0..2000)
       rlsb.add_range_requirement_query(:half_baths, 2..5)
 
-      # Within 100 miles of lat long
-      longitude = rand(-124.848974..-66.885444)
-      latitude  = rand(24.396308..49.384358)
-      rlsb.add_distance_requirement_query(longitude, latitude, 100)
+      # # Within 100 miles of lat long
+      # longitude = rand(-124.848974..-66.885444)
+      # latitude  = rand(24.396308..49.384358)
+      # rlsb.add_distance_requirement_query(longitude, latitude, 100)
 
       # Increase score if has amenities
       rlsb.add_table_existence_scoring_query(:amenity_parking_garage, 3)
       rlsb.add_table_existence_scoring_query(:amenity_dogs_allowed, 1)
-      rlsb.add_table_existence_scoring_query(:amenity_not_smoking_allowed, 2)
 
       # Increase score if has ranges
       rlsb.add_range_scoring_query(:square_feet, 400..100000, 3)
       rlsb.add_range_scoring_query(:monthly_rent, 0..1200, 1)
 
       # Increase score if within 50 miles of this lat and long
-      rlsb.add_distance_scoring_query(longitude, latitude, 50, 5)
+      # rlsb.add_distance_scoring_query(longitude, latitude, 50, 5)
       # Sorts by score, with the highest scored items coming first
 
       query = rlsb.to_lua_code(false)
     }
     @time_elapsed += total_time
     puts "Created query #{total_time}"
-    total_time = Benchmark.measure() {
-      puts r.eval(query)
+
+    puts "Lua Query:"
+    puts query
+
+    key = nil
+    time_for_search_execution = Benchmark.measure() {
+      key = r.eval(query)
     }
-    @time_elapsed += total_time
+
+    @time_elapsed += time_for_search_execution
+
+    puts "Key: #{key}"
+    puts "List Length: #{get_list(key).length}"
+
     puts "Running query #{total_time}"
   end
 
