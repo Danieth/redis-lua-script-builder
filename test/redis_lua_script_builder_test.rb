@@ -1,6 +1,6 @@
 require 'minitest/autorun'
-require '../lib/redis_lua_script_builder'
-require '../lib/redis_writer'
+require './lib/redis_lua_script_builder'
+require './lib/redis_writer'
 
 def array_sections_equal(set, *sections)
   base_index = 0

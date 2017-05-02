@@ -1,4 +1,7 @@
 require 'redis'
+
+$r = Redis.new
+
 class RedisLuaScriptBuilder
   attr_accessor :sinter_keys,
                 :sdiff_keys,
@@ -318,60 +321,63 @@ class RedisLuaScriptBuilder
   end
 end
 
-def self.test_query()
-  # Namespace query to q1_. In Prod these namespaces will be different per search.
-  rlsb = RedisLuaScriptBuilder.new("q1_")
+# def self.test_query()
+#   # Namespace query to q1_. In Prod these namespaces will be different per search.
+#   rlsb = RedisLuaScriptBuilder.new("q1_")
 
-  # TODO: Add table does not exist - should be more space efficient (and possibly faster) than sinter store on the amenity_not_* lists.
-  # TODO: Improve naming
-  # TODO: Turn these query methods into objects and add methods to them to determine if the queries cancel each other out / are invalid. At the same time, improve the local variable usage and creation in the marked TODO region of the core lua_code.
+#   # TODO: Add table does not exist - should be more space efficient (and possibly faster) than sinter store on the amenity_not_* lists.
+#   # TODO: Improve naming
+#   # TODO: Turn these query methods into objects and add methods to them to determine if the queries cancel each other out / are invalid. At the same time, improve the local variable usage and creation in the marked TODO region of the core lua_code.
 
-  # These id's must have these features/amenities etc.
-  rlsb.add_table_existence_requirement_query(:amenity_cats_allowed)
-  rlsb.add_table_existence_requirement_query(:amenity_ski_resort)
+#   # These id's must have these features/amenities etc.
+#   # rlsb.add_table_existence_requirement_query(:amenity_cats_allowed)
+#   # rlsb.add_table_existence_requirement_query(:amenity_ski_resort)
 
-  # rlsb.add_table_existence_requirement_query(:amenity_not_hoa) # See TODO above
-  rlsb.add_table_not_exist_requirement_query(:amenity_hoa)
+#   # rlsb.add_table_existence_requirement_query(:amenity_not_hoa) # See TODO above
+#   rlsb.add_table_not_exist_requirement_query(:amenity_hoa)
 
-  # In the future, searches could also look like
-  # rlsb.add_table_existence_requirement_query(:city_reston)
-  # rlsb.add_table_existence_requirement_query(:county_fairfax)
-  # rlsb.add_table_existence_requirement_query(:state_va)
-  # Etc. Anything binary.
-
-
-  # The returned id's attributes must be within these ranges.
-  rlsb.add_range_requirement_query(:square_feet, 400..1000)
-  rlsb.add_range_requirement_query(:monthly_rent, 0..2000)
-  rlsb.add_range_requirement_query(:half_baths, 2..5)
-
-  # In the future, searches could also look like
-  # rlsb.add_range_requirement_query(:stoves, 1..2) etc.
-  # Etc. Anything represented by an integer range
+#   # In the future, searches could also look like
+#   # rlsb.add_table_existence_requirement_query(:city_reston)
+#   # rlsb.add_table_existence_requirement_query(:county_fairfax)
+#   # rlsb.add_table_existence_requirement_query(:state_va)
+#   # Etc. Anything binary.
 
 
-  # Random coordinates in US bounding box
-  longitude = rand(-124.848974..-66.885444)
-  latitude  = rand(24.396308..49.384358)
-  # The returned id's must be within 100 miles of the longitude and latitude provided above
-  rlsb.add_distance_requirement_query(longitude, latitude, 100)
+#   # The returned id's attributes must be within these ranges.
+#   # rlsb.add_range_requirement_query(:square_feet, 400..1000)
+#   # rlsb.add_range_requirement_query(:monthly_rent, 0..2000)
+#   # rlsb.add_range_requirement_query(:half_baths, 2..5)
 
-  # In the future, we could add polygon and square support etc.
+#   # In the future, searches could also look like
+#   # rlsb.add_range_requirement_query(:stoves, 1..2) etc.
+#   # Etc. Anything represented by an integer range
 
 
-  # The order of the results will be weighted based on if the id exists in the table
-  rlsb.add_table_existence_scoring_query(:amenity_parking_garage, 3)
-  rlsb.add_table_existence_scoring_query(:amenity_dogs_allowed, 1)
-  rlsb.add_table_existence_scoring_query(:amenity_not_smoking_allowed, 2)
+#   # Random coordinates in US bounding box
+#   longitude = rand(-124.848974..-66.885444)
+#   latitude  = rand(24.396308..49.384358)
+#   # The returned id's must be within 100 miles of the longitude and latitude provided above
+#   # rlsb.add_distance_requirement_query(longitude, latitude, 100)
 
-  # The order of the results will be weighted based on if the attributes of the id exists within the provided ranges
-  rlsb.add_range_scoring_query(:square_feet, 400..100000, 3)
-  rlsb.add_range_scoring_query(:monthly_rent, 0..1200, 1)
+#   # In the future, we could add polygon and square support etc.
 
-  # The order of the results will be weighted based on if the location is within the 50 miles of the provided lat and long
-  rlsb.add_distance_scoring_query(longitude, latitude, 50, 5)
 
-  # Output the lua_code (and print the debug output)
-  puts rlsb.to_lua_code(true)
-end
-# test_query
+#   # The order of the results will be weighted based on if the id exists in the table
+#   # rlsb.add_table_existence_scoring_query(:amenity_parking_garage, 3)
+#   # rlsb.add_table_existence_scoring_query(:amenity_dogs_allowed, 1)
+#   # rlsb.add_table_existence_scoring_query(:amenity_not_smoking_allowed, 2)
+
+#   # The order of the results will be weighted based on if the attributes of the id exists within the provided ranges
+#   # rlsb.add_range_scoring_query(:square_feet, 400..100000, 3)
+#   # rlsb.add_range_scoring_query(:monthly_rent, 0..1200, 1)
+
+#   # The order of the results will be weighted based on if the location is within the 50 miles of the provided lat and long
+#   # rlsb.add_distance_scoring_query(longitude, latitude, 50, 5)
+
+#   # Output the lua_code (and print the debug output)
+#   ap rlsb.to_lua_code(true)
+#   key = rlsb.eval(true)
+#   ap key
+
+#   ap $r.lrange(key, 0, $r.llen(key))
+# end
